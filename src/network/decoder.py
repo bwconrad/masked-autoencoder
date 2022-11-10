@@ -90,7 +90,6 @@ class VitDecoder(nn.Module):
         temp = torch.gather(
             temp, dim=1, index=repeat(idx_unshuffle, "b l -> b l d", d=D)
         )
-        ####################
 
         # Prepend cls token
         x = torch.cat([x[:, :1, :], temp], dim=1)
