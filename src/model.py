@@ -1,4 +1,5 @@
 import os
+from typing import Tuple
 
 import pytorch_lightning as pl
 import torch
@@ -25,7 +26,7 @@ class MaskedAutoencoderModel(pl.LightningModule):
         img_size: int = 224,
         lr: float = 1.5e-4,
         optimizer: str = "adamw",
-        betas: tuple[float, float] = (0.9, 0.95),
+        betas: Tuple[float, float] = (0.9, 0.95),
         weight_decay: float = 0.05,
         momentum: float = 0.9,
         scheduler: str = "cosine",
