@@ -8,7 +8,7 @@ from timm.models.vision_transformer import Block
 from .utils import get_2d_sincos_pos_embed
 
 
-class VitDecoder(nn.Module):
+class VisionTransformerDecoder(nn.Module):
     def __init__(
         self,
         patch_size: int = 16,
@@ -19,9 +19,9 @@ class VitDecoder(nn.Module):
         in_dim: int = 768,
         num_heads: int = 16,
         mlp_ratio: int = 4,
-        norm_layer: nn.Module = partial(nn.LayerNorm, eps=1e-6),
-        act_layer: nn.Module = nn.GELU,
-    ):
+        norm_layer: nn.Module = partial(nn.LayerNorm, eps=1e-6),  # type:ignore
+        act_layer: nn.Module = nn.GELU,  # type:ignore
+    ) -> None:
         super().__init__()
 
         self.embed = nn.Linear(in_dim, embed_dim, bias=True)
@@ -41,8 +41,8 @@ class VitDecoder(nn.Module):
                     num_heads=num_heads,
                     mlp_ratio=mlp_ratio,
                     qkv_bias=True,
-                    norm_layer=norm_layer,
-                    act_layer=act_layer,
+                    norm_layer=norm_layer,  # type:ignore
+                    act_layer=act_layer,  # type:ignore
                 )
                 for _ in range(depth)
             ]
@@ -52,7 +52,7 @@ class VitDecoder(nn.Module):
 
         self.init_weights(num_patches)
 
-    def init_weights(self, num_patches):
+    def init_weights(self, num_patches) -> None:
         # Initialize to sin-cos position embedding
         pos_embed = get_2d_sincos_pos_embed(
             self.pos_embed.shape[-1],
@@ -67,7 +67,7 @@ class VitDecoder(nn.Module):
         # All other weights
         self.apply(self._init_weights)
 
-    def _init_weights(self, m):
+    def _init_weights(self, m) -> None:
         if isinstance(m, nn.Linear):
             torch.nn.init.xavier_uniform_(m.weight)
             if isinstance(m, nn.Linear) and m.bias is not None:
@@ -76,20 +76,20 @@ class VitDecoder(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward(self, x, idx_unshuffle):
+    def forward(self, x: torch.Tensor, idx_restore: torch.Tensor) -> torch.Tensor:
         # Project to decoder embed size
         x = self.embed(x)
 
         # Append mask tokens to input
-        L = idx_unshuffle.shape[1]
-        B, L_unmasked, D = x.shape
-        mask_tokens = self.mask_token.repeat(B, L + 1 - L_unmasked, 1)
+        n = idx_restore.shape[1]
+        b, n_unmasked, d = x.shape
+        n_masked = n + 1 - n_unmasked
+
+        mask_tokens = repeat(self.mask_token, "1 1 d -> b l d", b=b, l=n_masked)
         temp = torch.concat([x[:, 1:, :], mask_tokens], dim=1)  # Skip cls token
 
-        # Unshuffle tokens
-        temp = torch.gather(
-            temp, dim=1, index=repeat(idx_unshuffle, "b l -> b l d", d=D)
-        )
+        # Restore the original patch positions
+        temp = torch.gather(temp, dim=1, index=repeat(idx_restore, "b l -> b l d", d=d))
 
         # Prepend cls token
         x = torch.cat([x[:, :1, :], temp], dim=1)
@@ -106,8 +106,19 @@ class VitDecoder(nn.Module):
         return x[:, 1:, :]  # Don't return cls token
 
 
-def dec512d8b(patch_size, num_patches, in_dim, **kwargs):
-    return VitDecoder(
+def build_decoder(model, **kwargs) -> VisionTransformerDecoder:
+    try:
+        model_fn = MODEL_DICT[model]
+    except:
+        raise ValueError(
+            f"{model} is not an available decoder. Should be one of {[k for k in MODEL_DICT.keys()]}"
+        )
+
+    return model_fn(**kwargs)
+
+
+def dec512d8b(patch_size, num_patches, in_dim, **kwargs) -> VisionTransformerDecoder:
+    return VisionTransformerDecoder(
         patch_size=patch_size,
         num_patches=num_patches,
         in_dim=in_dim,
@@ -119,14 +130,3 @@ def dec512d8b(patch_size, num_patches, in_dim, **kwargs):
 
 
 MODEL_DICT = {"dec512d8b": dec512d8b}
-
-
-def build_decoder(model, **kwargs):
-    try:
-        model_fn = MODEL_DICT[model]
-    except:
-        raise ValueError(
-            f"{model} is not an available decoder. Should be one of {[k for k in MODEL_DICT.keys()]}"
-        )
-
-    return model_fn(**kwargs)

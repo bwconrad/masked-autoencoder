@@ -10,7 +10,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from torchvision.utils import make_grid, save_image
 from transformers.optimization import get_cosine_schedule_with_warmup
 
-from .network.decoder import VitDecoder
+from .network.decoder import VisionTransformerDecoder
 from .network.encoder import build_encoder
 
 
@@ -21,9 +21,8 @@ class MaskedAutoencoderModel(pl.LightningModule):
         decoder_embed_dim=512,
         decoder_depth=8,
         decoder_num_heads=16,
-        mask_ratio: float = 0.75,
         norm_pixel_loss: bool = True,
-        img_size: int = 224,
+        image_size: int = 224,
         lr: float = 1.5e-4,
         optimizer: str = "adamw",
         betas: Tuple[float, float] = (0.9, 0.95),
@@ -40,9 +39,8 @@ class MaskedAutoencoderModel(pl.LightningModule):
             decoder_embed_dim: Embed dim of decoder
             decoder_depth: Number of transformer blocks in decoder
             decoder_num_heads: Number of attention heads in decoder
-            mask_ratio: Ratio of input image patches to mask
             norm_pixel_loss: Calculate loss using normalized pixel value targets
-            img_size: Size of input image
+            image_size: Size of input image
             lr: Learning rate (should be linearly scaled with batch size)
             optimizer: Name of optimizer (adam | adamw | sgd)
             betas: Adam beta parameters
@@ -58,9 +56,8 @@ class MaskedAutoencoderModel(pl.LightningModule):
         self.decoder_embed_dim = decoder_embed_dim
         self.decoder_depth = decoder_depth
         self.decoder_num_heads = decoder_num_heads
-        self.mask_ratio = mask_ratio
         self.norm_pixel_loss = norm_pixel_loss
-        self.img_size = img_size
+        self.image_size = image_size
         self.lr = lr
         self.optimizer = optimizer
         self.betas = betas
@@ -72,9 +69,9 @@ class MaskedAutoencoderModel(pl.LightningModule):
 
         # Initialize networks
         self.encoder, self.patch_size = build_encoder(
-            encoder_name, img_size=self.img_size
+            encoder_name, img_size=self.image_size
         )
-        self.decoder = VitDecoder(
+        self.decoder = VisionTransformerDecoder(
             patch_size=self.patch_size,
             num_patches=self.encoder.patch_embed.num_patches,
             in_dim=self.encoder.embed_dim,
@@ -88,7 +85,7 @@ class MaskedAutoencoderModel(pl.LightningModule):
         if self.channel_last:
             self = self.to(memory_format=torch.channels_last)
 
-    def patchify(self, x):
+    def patchify(self, x: torch.Tensor) -> torch.Tensor:
         """Rearrange image into patches
         (b, 3, h, w) -> (b, l, patch_size^2 * 3)
         """
@@ -115,8 +112,10 @@ class MaskedAutoencoderModel(pl.LightningModule):
             w=w,
         )
 
-    def log_samples(self, inp, pred, mask):
-        """Log sample images"""
+    def log_samples(
+        self, inp: torch.Tensor, pred: torch.Tensor, mask: torch.Tensor
+    ) -> None:
+        """Log sample outputs"""
         # Only log up to 16 images
         inp, pred, mask = inp[:16], pred[:16], mask[:16]
 
@@ -125,15 +124,12 @@ class MaskedAutoencoderModel(pl.LightningModule):
 
         # Merge original and predicted patches
         pred = pred * mask[:, :, None]
-        inp = inp * (1 - mask[:, :, None])
+        inp = inp * (~mask[:, :, None])
         res = self.unpatchify(inp) + self.unpatchify(pred)
 
         # Log result
         if "CSVLogger" in str(self.logger.__class__):
-            path = os.path.join(
-                self.logger.log_dir,  # type:ignore
-                "samples",
-            )
+            path = os.path.join(self.logger.log_dir, "samples")  # type:ignore
             if not os.path.exists(path):
                 os.makedirs(path)
             filename = os.path.join(path, str(self.current_epoch) + "ep.png")
@@ -142,7 +138,9 @@ class MaskedAutoencoderModel(pl.LightningModule):
             grid = make_grid(res, nrow=4, normalize=True)
             self.logger.log_image(key="sample", images=[grid])  # type:ignore
 
-    def loss(self, pred, target, mask):
+    def loss(
+        self, pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor
+    ) -> torch.Tensor:
         """MSE loss on masked patches"""
         target = self.patchify(target)
 
@@ -159,13 +157,12 @@ class MaskedAutoencoderModel(pl.LightningModule):
 
         return loss
 
-    def shared_step(self, x, mode="train", idx=None):
-        if self.channel_last:
-            x = x.to(memory_format=torch.channels_last)
+    def shared_step(self, batch, mode="train", idx=None):
+        x, mask, idx_restore = batch
 
-        # Pass through autoencoder
-        z, mask, idx_unshuffle = self.encoder(x, self.mask_ratio)
-        pred = self.decoder(z, idx_unshuffle)
+        # Pass through auto-encoder
+        z = self.encoder(x, mask)
+        pred = self.decoder(z, idx_restore)
 
         # Calculate loss
         loss = self.loss(pred, x, mask)
@@ -175,14 +172,10 @@ class MaskedAutoencoderModel(pl.LightningModule):
         if mode == "val" and idx == 0:
             self.log_samples(x, pred, mask)
 
-        return {"loss": loss}
+        return loss
 
     def training_step(self, x, _):
-        self.log(
-            "lr",
-            self.trainer.optimizers[0].param_groups[0]["lr"],  # type:ignore
-            prog_bar=True,
-        )
+        self.log("lr", self.trainer.optimizers[0].param_groups[0]["lr"], prog_bar=True)
         return self.shared_step(x, mode="train")
 
     def validation_step(self, x, batch_idx):
@@ -190,13 +183,13 @@ class MaskedAutoencoderModel(pl.LightningModule):
 
     def configure_optimizers(self):
         """Initialize optimizer and learning rate schedule"""
-        # Optimizer
 
         # Set weight decay to 0 for bias and norm layers
         params = param_groups_weight_decay(
             self.encoder, self.weight_decay
         ) + param_groups_weight_decay(self.decoder, self.weight_decay)
 
+        # Initialize optimizer
         if self.optimizer == "adam":
             optimizer = Adam(
                 params,
@@ -223,7 +216,7 @@ class MaskedAutoencoderModel(pl.LightningModule):
                 f"{self.optimizer} is not an available optimizer. Should be one of ['adam', 'adamw', 'sgd']"
             )
 
-        # Learning rate schedule
+        # Initialize learning rate schedule
         if self.scheduler == "cosine":
             epoch_steps = (
                 self.trainer.estimated_stepping_batches

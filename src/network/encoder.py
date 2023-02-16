@@ -1,16 +1,17 @@
 from functools import partial
+from typing import Tuple
 
-import timm.models.vision_transformer as vision_transformer
 import torch
 import torch.nn as nn
 from einops import repeat
+from timm.models.vision_transformer import VisionTransformer
 
-from .utils import get_2d_sincos_pos_embed
+from src.network.utils import get_2d_sincos_pos_embed
 
 
-class VisionTransformer(vision_transformer.VisionTransformer):
-    def __init__(self, **kwargs):
-        super(VisionTransformer, self).__init__(**kwargs)
+class VisionTransformerMAE(VisionTransformer):
+    def __init__(self, **kwargs) -> None:
+        super(VisionTransformerMAE, self).__init__(**kwargs)
         assert self.num_prefix_tokens == 1  # Must have cls token
 
         # Re-initialize with fixed sin-cos position embedding
@@ -19,7 +20,7 @@ class VisionTransformer(vision_transformer.VisionTransformer):
         )
         self.init_pos_embed()
 
-    def init_pos_embed(self):
+    def init_pos_embed(self) -> None:
         # Initialize to sin-cos position embedding
         pos_embed = get_2d_sincos_pos_embed(
             self.pos_embed.shape[-1],
@@ -28,51 +29,32 @@ class VisionTransformer(vision_transformer.VisionTransformer):
         )
         self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
-    def random_masking(self, x: torch.Tensor, mask_ratio: float):
-        B, L, D = x.shape
-
-        # Number of patches to keep
-        num_keep = int(L * (1 - mask_ratio))
-
-        # Sort array of random noise
-        noise = torch.rand((B, L), device=x.device)
-        idx_shuffle = torch.argsort(noise, dim=1)
-        idx_unshuffle = torch.argsort(idx_shuffle, dim=1)  # Undo shuffling
-
-        # Keep indices of n_keep smallest values
-        idx_keep = idx_shuffle[:, :num_keep]
-        x_masked = torch.gather(x, dim=1, index=repeat(idx_keep, "b l -> b l d", d=D))
-
-        # Generate binary mask
-        mask = torch.ones((B, L), device=x.device)
-        mask[:, :num_keep] = 0
-        mask = torch.gather(mask, dim=1, index=idx_unshuffle)
-
-        return x_masked, mask, idx_unshuffle
-
-    def forward(self, x, mask_ratio=0.75):
+    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         # Patch embed image
         x = self.patch_embed(x)
+        b, n, d = x.size()
 
-        # Add pos embed skipping cls token
-        x = x + self.pos_embed[:, 1:, :]
+        # Add position embedding
+        x = x + self.pos_embed[:, 1:, :]  # Skip cls token
 
-        # Mask the image
-        x, mask, idx_unshuffle = self.random_masking(x, mask_ratio)
+        # Collect unmasked patches: [b, n, d] -> [b, n * (1-mask_ratio), d]
+        mask = ~mask[:, :, None]  # Change to 1 = keep patch
+        x = torch.masked_select(x, mask).reshape(b, -1, d)
 
-        # Append the cls token
-        cls_token = self.cls_token + self.pos_embed[:, 0, :]
-        x = torch.cat((cls_token.expand(x.shape[0], -1, -1), x), dim=1)
+        # Append cls token
+        cls_token = self.cls_token + self.pos_embed[:, :1, :]
+        cls_token = repeat(cls_token, "1 1 d -> b 1 d", b=b)
+        x = torch.cat([cls_token, x], dim=1)
 
         # Apply transformer layers
         x = self.norm_pre(x)
         x = self.blocks(x)
         x = self.norm(x)
 
-        return x, mask, idx_unshuffle
+        return x
 
 
-def build_encoder(model, **kwargs):
+def build_encoder(model, **kwargs) -> Tuple[VisionTransformerMAE, int]:
     try:
         model_fn, patch_size = MODEL_DICT[model]
     except:
@@ -83,8 +65,8 @@ def build_encoder(model, **kwargs):
     return model_fn(**kwargs), patch_size
 
 
-def vit_tiny_patch16(**kwargs):
-    return VisionTransformer(
+def vit_tiny_patch16(**kwargs) -> VisionTransformerMAE:
+    return VisionTransformerMAE(
         patch_size=16,
         embed_dim=192,
         depth=12,
@@ -96,8 +78,8 @@ def vit_tiny_patch16(**kwargs):
     )
 
 
-def vit_small_patch16(**kwargs):
-    return VisionTransformer(
+def vit_small_patch16(**kwargs) -> VisionTransformerMAE:
+    return VisionTransformerMAE(
         patch_size=16,
         embed_dim=384,
         depth=12,
@@ -109,8 +91,8 @@ def vit_small_patch16(**kwargs):
     )
 
 
-def vit_base_patch16(**kwargs):
-    return VisionTransformer(
+def vit_base_patch16(**kwargs) -> VisionTransformerMAE:
+    return VisionTransformerMAE(
         patch_size=16,
         embed_dim=768,
         depth=12,
@@ -122,8 +104,8 @@ def vit_base_patch16(**kwargs):
     )
 
 
-def vit_large_patch16(**kwargs):
-    return VisionTransformer(
+def vit_large_patch16(**kwargs) -> VisionTransformerMAE:
+    return VisionTransformerMAE(
         patch_size=16,
         embed_dim=1024,
         depth=24,
@@ -135,8 +117,8 @@ def vit_large_patch16(**kwargs):
     )
 
 
-def vit_huge_patch14(**kwargs):
-    return VisionTransformer(
+def vit_huge_patch14(**kwargs) -> VisionTransformerMAE:
+    return VisionTransformerMAE(
         patch_size=14,
         embed_dim=1280,
         depth=32,
@@ -155,15 +137,3 @@ MODEL_DICT = {
     "vit_large_patch16": (vit_large_patch16, 16),
     "vit_huge_patch14": (vit_huge_patch14, 14),
 }
-
-
-if __name__ == "__main__":
-    from decoder import VitDecoder
-
-    e = vit_base_patch16(img_size=192)
-    d = VitDecoder()
-    x = torch.rand(2, 3, 192, 192)
-    y, mask, idx = e(x)
-    print(y.size())
-    y = d(y, idx)
-    print(y.size())
