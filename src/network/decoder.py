@@ -5,7 +5,7 @@ import torch.nn as nn
 from einops import repeat
 from timm.models.vision_transformer import Block
 
-from .utils import get_2d_sincos_pos_embed
+from src.network.pos_embed import get_2d_sincos_pos_embed
 
 
 class VisionTransformerDecoder(nn.Module):
@@ -53,7 +53,7 @@ class VisionTransformerDecoder(nn.Module):
         self.init_weights(num_patches)
 
     def init_weights(self, num_patches) -> None:
-        # Initialize to sin-cos position embedding
+        # Initialize sin-cos position embedding
         pos_embed = get_2d_sincos_pos_embed(
             self.pos_embed.shape[-1],
             int(num_patches**0.5),

@@ -6,7 +6,7 @@ import torch.nn as nn
 from einops import repeat
 from timm.models.vision_transformer import VisionTransformer
 
-from src.network.utils import get_2d_sincos_pos_embed
+from src.network.pos_embed import get_2d_sincos_pos_embed
 
 
 class VisionTransformerMAE(VisionTransformer):
