@@ -10,14 +10,15 @@ from torch.optim.lr_scheduler import LambdaLR
 from torchvision.utils import make_grid, save_image
 from transformers.optimization import get_cosine_schedule_with_warmup
 
-from .network.decoder import VisionTransformerDecoder
+from .network.decoder import LinearDecoder, VisionTransformerDecoder
 from .network.encoder import build_encoder
 
 
 class MaskedAutoencoderModel(pl.LightningModule):
     def __init__(
         self,
-        encoder_name: str = "vit_base_patch16",
+        encoder_arch: str = "vit_base_patch16",
+        decoder_type: str = "vit",
         decoder_embed_dim=512,
         decoder_depth=8,
         decoder_num_heads=16,
@@ -30,15 +31,16 @@ class MaskedAutoencoderModel(pl.LightningModule):
         momentum: float = 0.9,
         scheduler: str = "cosine",
         warmup_epochs: int = 0,
-        channel_last: bool = False,
     ):
         """Masked Autoencoder Pretraining Model
 
         Args:
-            encoder_name: Name of encoder network
-            decoder_embed_dim: Embed dim of decoder
-            decoder_depth: Number of transformer blocks in decoder
-            decoder_num_heads: Number of attention heads in decoder
+            encoder_arch: Name of encoder network architecture. One of [vit_tiny_patch16, vit_small_patch16,
+                 vit_base_patch16, vit_large_patch16, vit_huge_14]
+            decoder_type: Decoder type. One of [vit, linear]
+            decoder_embed_dim: Embed dim of ViT decoder
+            decoder_depth: Number of transformer blocks in ViT decoder
+            decoder_num_heads: Number of attention heads in ViT decoder
             norm_pixel_loss: Calculate loss using normalized pixel value targets
             image_size: Size of input image
             lr: Learning rate (should be linearly scaled with batch size)
@@ -48,11 +50,11 @@ class MaskedAutoencoderModel(pl.LightningModule):
             momentum: SGD momentum parameter
             scheduler: Name of learning rate scheduler [cosine, none]
             warmup_epochs: Number of warmup epochs
-            channel_last: Change to channel last memory format for possible training speed up
         """
         super().__init__()
         self.save_hyperparameters()
-        self.encoder_name = encoder_name
+        self.encoder_arch = encoder_arch
+        self.decoder_type = decoder_type
         self.decoder_embed_dim = decoder_embed_dim
         self.decoder_depth = decoder_depth
         self.decoder_num_heads = decoder_num_heads
@@ -65,25 +67,25 @@ class MaskedAutoencoderModel(pl.LightningModule):
         self.momentum = momentum
         self.scheduler = scheduler
         self.warmup_epochs = warmup_epochs
-        self.channel_last = channel_last
 
         # Initialize networks
         self.encoder, self.patch_size = build_encoder(
-            encoder_name, img_size=self.image_size
+            encoder_arch, img_size=self.image_size
         )
-        self.decoder = VisionTransformerDecoder(
-            patch_size=self.patch_size,
-            num_patches=self.encoder.patch_embed.num_patches,
-            in_dim=self.encoder.embed_dim,
-            embed_dim=self.decoder_embed_dim,
-            depth=self.decoder_depth,
-            num_heads=self.decoder_num_heads,
-        )
-
-        # Change to channel last memory format
-        # https://pytorch.org/tutorials/intermediate/memory_format_tutorial.html
-        if self.channel_last:
-            self = self.to(memory_format=torch.channels_last)
+        if self.decoder_type == "vit":
+            self.decoder = VisionTransformerDecoder(
+                patch_size=self.patch_size,
+                num_patches=self.encoder.patch_embed.num_patches,
+                in_dim=self.encoder.embed_dim,
+                embed_dim=self.decoder_embed_dim,
+                depth=self.decoder_depth,
+                num_heads=self.decoder_num_heads,
+            )
+        else:
+            self.decoder = LinearDecoder(
+                in_dim=self.encoder.embed_dim,
+                patch_size=self.patch_size,
+            )
 
     def patchify(self, x: torch.Tensor) -> torch.Tensor:
         """Rearrange image into patches

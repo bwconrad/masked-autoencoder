@@ -106,27 +106,30 @@ class VisionTransformerDecoder(nn.Module):
         return x[:, 1:, :]  # Don't return cls token
 
 
-def build_decoder(model, **kwargs) -> VisionTransformerDecoder:
-    try:
-        model_fn = MODEL_DICT[model]
-    except:
-        raise ValueError(
-            f"{model} is not an available decoder. Should be one of {[k for k in MODEL_DICT.keys()]}"
-        )
+class LinearDecoder(nn.Module):
+    def __init__(
+        self, in_dim: int, patch_size: int, in_channels: int = 3, **kwargs
+    ) -> None:
+        super().__init__()
+        self.fc = nn.Linear(in_dim, patch_size**2 * in_channels, bias=True)
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, in_dim))
 
-    return model_fn(**kwargs)
+    def forward(self, x: torch.Tensor, idx_restore: torch.Tensor) -> torch.Tensor:
+        # Append mask tokens to input
+        n = idx_restore.shape[1]
+        b, n_unmasked, d = x.shape
+        n_masked = n + 1 - n_unmasked
 
+        mask_tokens = repeat(self.mask_token, "1 1 d -> b l d", b=b, l=n_masked)
+        temp = torch.concat([x[:, 1:, :], mask_tokens], dim=1)  # Skip cls token
 
-def dec512d8b(patch_size, num_patches, in_dim, **kwargs) -> VisionTransformerDecoder:
-    return VisionTransformerDecoder(
-        patch_size=patch_size,
-        num_patches=num_patches,
-        in_dim=in_dim,
-        embed_dim=512,
-        depth=8,
-        num_heads=16,
-        **kwargs,
-    )
+        # Restore the original patch positions
+        temp = torch.gather(temp, dim=1, index=repeat(idx_restore, "b l -> b l d", d=d))
 
+        # Prepend cls token
+        x = torch.cat([x[:, :1, :], temp], dim=1)
 
-MODEL_DICT = {"dec512d8b": dec512d8b}
+        # Pass through linear layer
+        x = self.fc(x)
+
+        return x[:, 1:, :]  # Don't return cls token
